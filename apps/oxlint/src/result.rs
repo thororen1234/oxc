@@ -12,6 +12,11 @@ pub enum CliRunResult {
     InvalidOptionSeverityWithoutFilter,
     InvalidOptionSeverityWithoutPluginName,
     InvalidOptionSeverityWithoutRuleName,
+    InvalidOptionFixWithFixDryRun,
+    InvalidOptionFixWithStdin,
+    InvalidOptionFixType,
+    StdinReadFailed,
+    OutputFileWriteFailed,
     LintSucceeded,
     LintFoundErrors,
     LintUnprunedSuppressions,
@@ -45,6 +50,11 @@ impl Termination for CliRunResult {
             | Self::InvalidOptionSeverityWithoutFilter
             | Self::InvalidOptionSeverityWithoutPluginName
             | Self::InvalidOptionSeverityWithoutRuleName
+            | Self::InvalidOptionFixWithFixDryRun
+            | Self::InvalidOptionFixWithStdin
+            | Self::InvalidOptionFixType
+            | Self::StdinReadFailed
+            | Self::OutputFileWriteFailed
             | Self::LintUnprunedSuppressions
             | Self::TsGoLintError => ExitCode::FAILURE,
         }

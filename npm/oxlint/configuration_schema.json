@@ -17124,6 +17124,11 @@
           "minimum": 0.0,
           "markdownDescription": "Specify a warning threshold. Exits with an error status if warnings exceed this value.\n\nEquivalent to passing `--max-warnings` on the CLI."
         },
+        "noInlineConfig": {
+          "description": "Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`),\n`/* global */` comments, and rule configuration comments (`/* eslint rule: \"off\" */`).\n\nEquivalent to passing `--no-inline-config` on the CLI.\nDefaults to `false`.\nOnly supported in the root configuration file.",
+          "type": "boolean",
+          "markdownDescription": "Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`),\n`/* global */` comments, and rule configuration comments (`/* eslint rule: \"off\" */`).\n\nEquivalent to passing `--no-inline-config` on the CLI.\nDefaults to `false`.\nOnly supported in the root configuration file."
+        },
         "reportUnusedDisableDirectives": {
           "description": "Report unused disable directives (e.g. `// oxlint-disable-line` or `// eslint-disable-line`).\n\nEquivalent to passing `--report-unused-disable-directives-severity` on the CLI.\nCLI flags take precedence over this value when both are set.\nOnly supported in the root configuration file.",
           "allOf": [

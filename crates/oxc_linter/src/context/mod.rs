@@ -17,7 +17,7 @@ use crate::{
     FrameworkFlags, ModuleRecord, OxlintEnv, OxlintGlobals, OxlintSettings, WEBSITE_BASE_RULES_URL,
     config::GlobalValue,
     disable_directives::DisableDirectives,
-    fixer::{Fix, FixKind, Message, PossibleFixes, RuleFix, RuleFixer},
+    fixer::{Fix, FixKind, FixTypes, Message, PossibleFixes, RuleFix, RuleFixer},
     frameworks::FrameworkOptions,
     utils::{ReactCompilerResults, build_react_compiler_results},
 };
@@ -43,6 +43,8 @@ pub struct LintContext<'a> {
     current_plugin_display_name: &'static str,
     /// Kebab-cased name of the current rule being linted. Example: `no-unused-vars`, `no-undef`.
     current_rule_name: &'static str,
+    /// Fix type of the current rule, used to filter fixes with `--fix-type`.
+    current_rule_fix_type: FixTypes,
     /// Capabilities of the current rule to fix issues. Indicates whether:
     /// - Rule cannot be auto-fixed [`RuleFixMeta::None`]
     /// - Rule needs an auto-fix to be written still [`RuleFixMeta::FixPending`]
@@ -172,7 +174,7 @@ impl<'a> LintContext<'a> {
     /// Sets of global variables that have been enabled or disabled.
     #[inline]
     pub fn globals(&self) -> &OxlintGlobals {
-        &self.parent.config.globals
+        self.parent.globals()
     }
 
     /// Checks if the provided identifier is a reference to a global variable.
@@ -461,7 +463,7 @@ impl<'a> LintContext<'a> {
                     rule_fix.kind()
                 );
 
-                if self.parent.fix.can_apply(rule_fix.kind()) && !rule_fix.is_empty() {
+                if self.can_apply_fix(&rule_fix) {
                     Some(rule_fix.into_fix(self.source_text()))
                 } else {
                     None
@@ -499,6 +501,13 @@ impl<'a> LintContext<'a> {
         self.finish_create_fix(rule_fix, diagnostic)
     }
 
+    /// Whether `rule_fix` is allowed by the fix kind (`--fix`, `--fix-suggestions`, ...) and `--fix-type`.
+    fn can_apply_fix(&self, rule_fix: &RuleFix) -> bool {
+        self.parent.fix.can_apply(rule_fix.kind())
+            && self.parent.allows_fix_type(self.current_rule_fix_type)
+            && !rule_fix.is_empty()
+    }
+
     /// Non-generic tail of [`LintContext::create_fix`].
     ///
     /// `create_fix` is generic over the fixer closure and its return type, so it
@@ -516,7 +525,7 @@ impl<'a> LintContext<'a> {
             _ => diagnostic,
         };
 
-        if self.parent.fix.can_apply(rule_fix.kind()) && !rule_fix.is_empty() {
+        if self.can_apply_fix(&rule_fix) {
             let fix = rule_fix.into_fix(self.source_text());
             #[cfg(debug_assertions)]
             {

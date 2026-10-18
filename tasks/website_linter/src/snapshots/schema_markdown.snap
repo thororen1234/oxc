@@ -445,6 +445,19 @@ Specify a warning threshold. Exits with an error status if warnings exceed this 
 Equivalent to passing `--max-warnings` on the CLI.
 
 
+### options.noInlineConfig
+
+type: `boolean`
+
+
+Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`),
+`/* global */` comments, and rule configuration comments (`/* eslint rule: "off" */`).
+
+Equivalent to passing `--no-inline-config` on the CLI.
+Defaults to `false`.
+Only supported in the root configuration file.
+
+
 ### options.reportUnusedDisableDirectives
 
 type: `"allow" | "off" | "warn" | "error" | "deny" | integer`

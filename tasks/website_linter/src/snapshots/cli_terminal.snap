@@ -16,6 +16,9 @@ Basic Configuration
                               file. Use this only when your project uses a non-standard tsconfig
                               name or location.
         --init                Initialize oxlint configuration with default values
+        --stdin               Lint code provided on stdin instead of files
+        --stdin-filename=PATH  Path of the file whose code is provided on stdin. Used to choose the
+                              language, configuration and ignore patterns.
 
 Allowing / Denying Multiple Lints
    Accumulate rules and categories from left to right on the command-line.
@@ -56,6 +59,13 @@ Fix Problems
                               the output.
         --fix-suggestions     Apply auto-fixable suggestions. May change program behavior.
         --fix-dangerously     Apply dangerous fixes and suggestions
+        --fix-dry-run         Fix issues like `--fix`, but don't save the changes to files. Only
+                              issues which would remain after fixing are reported.
+        --fix-type=TYPE       Only apply fixes of these types: `problem`, `suggestion`, `layout` or
+                              `directive`. Separate types with commas, or repeat the option.
+                              Built-in `correctness` and `suspicious` rules are `problem`, other
+                              built-in rules are `suggestion`. JS plugin rules use their
+                              `meta.type`.
 
 Ignore Files
         --ignore-path=PATH    Specify the file to use as your `.eslintignore`
@@ -75,6 +85,7 @@ Output
     -f, --format=ARG          Use a specific output format. Possible values: `checkstyle`,
                               `default`, `agent`, `github`, `gitlab`, `json`, `junit`, `sarif`,
                               `stylish`, `unix`
+    -o, --output-file=PATH    Write the lint report to a file instead of to stdout
         --debug=OPTIONS       Enable debug output options. Options are comma-separated. Possible
                               values:
                                * `files` - Print the list of files that will be linted, then exit.
@@ -95,6 +106,9 @@ Inline Configuration Comments
                               `--report-unused-disable-directives`, but allows you to specify the
                               severity level of the reported errors. Only one of these two options
                               can be used at a time.
+        --no-inline-config    Ignore configuration in comments: disable directives
+                              (`eslint-disable`, `oxlint-disable`), `/* global */` comments, and
+                              rule configuration comments (`/* eslint rule: "off" */`)
 
 Available positional items:
     PATH                      Single file, single path or list of paths

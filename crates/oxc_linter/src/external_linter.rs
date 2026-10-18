@@ -72,6 +72,9 @@ pub struct LoadPluginResult {
     pub name: String,
     pub offset: usize,
     pub rule_names: Vec<String>,
+    /// `meta.type` of each rule in `rule_names`, if it has one.
+    #[serde(default)]
+    pub rule_types: Vec<Option<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

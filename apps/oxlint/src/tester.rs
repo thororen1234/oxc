@@ -27,6 +27,10 @@ impl Tester {
         self
     }
 
+    pub fn cwd(&self) -> &PathBuf {
+        &self.cwd
+    }
+
     pub fn test(&self, args: &[&str]) {
         let mut new_args = vec!["--silent"];
         new_args.extend(args);
@@ -43,6 +47,25 @@ impl Tester {
         let options = lint_command().run_inner(new_args.as_slice()).unwrap();
         let mut output = Vec::new();
         let result = CliRunner::new(options, None).with_cwd(self.cwd.clone()).run(&mut output);
+        (String::from_utf8(output).unwrap(), result)
+    }
+
+    /// Like [`Tester::test_output`], but without `--silent`, so diagnostics are included in the output.
+    pub fn test_output_with_diagnostics(&self, args: &[&str]) -> (String, CliRunResult) {
+        let options = lint_command().run_inner(args).unwrap();
+        let mut output = Vec::new();
+        let result = CliRunner::new(options, None).with_cwd(self.cwd.clone()).run(&mut output);
+        (String::from_utf8(output).unwrap(), result)
+    }
+
+    /// Run with `stdin_source_text` as the code passed to `--stdin`.
+    pub fn test_stdin(&self, args: &[&str], stdin_source_text: &str) -> (String, CliRunResult) {
+        let options = lint_command().run_inner(args).unwrap();
+        let mut output = Vec::new();
+        let result = CliRunner::new(options, None)
+            .with_cwd(self.cwd.clone())
+            .with_stdin_source_text(stdin_source_text.to_string())
+            .run(&mut output);
         (String::from_utf8(output).unwrap(), result)
     }
 

@@ -10,8 +10,9 @@ use oxc_diagnostics::{DiagnosticSender, DiagnosticService};
 use oxc_span::Span;
 
 use crate::{
-    AllowWarnDeny, DisableDirectives, FixKind, LintService, LintServiceOptions, Linter, Message,
-    OsFileSystem, RuleTimingStore, TsGoLintState, suppression::DiffManager,
+    AllowWarnDeny, DisableDirectives, FixKind, FixTypes, LintService, LintServiceOptions, Linter,
+    Message, OsFileSystem, RuleTimingStore, RuntimeFileSystem, TsGoLintState,
+    suppression::DiffManager,
 };
 
 /// Unified runner that orchestrates both regular (oxc) and type-aware (tsgolint) linting
@@ -26,6 +27,8 @@ pub struct LintRunner {
     /// Current working directory
     cwd: PathBuf,
     type_check_only: bool,
+    /// File system used by [`LintRunner::lint_files`] to read files and write fixes.
+    file_system: Box<dyn RuntimeFileSystem + Sync + Send>,
 }
 
 /// Manages disable directives across all linting engines.
@@ -151,9 +154,11 @@ pub struct LintRunnerBuilder {
     lint_service_options: LintServiceOptions,
     silent: bool,
     fix_kind: FixKind,
+    fix_types: FixTypes,
     type_check_only: bool,
     timings: bool,
     with_ignore_fixes: bool,
+    file_system: Box<dyn RuntimeFileSystem + Sync + Send>,
 }
 
 impl LintRunnerBuilder {
@@ -165,9 +170,11 @@ impl LintRunnerBuilder {
             lint_service_options,
             silent: false,
             fix_kind: FixKind::None,
+            fix_types: FixTypes::all(),
             type_check_only: false,
             timings: false,
             with_ignore_fixes: false,
+            file_system: Box::new(OsFileSystem),
         }
     }
 
@@ -195,6 +202,13 @@ impl LintRunnerBuilder {
         self
     }
 
+    /// Only apply fixes from rules of these types, for type-aware rules. See [`FixTypes`].
+    #[must_use]
+    pub fn with_fix_types(mut self, fix_types: FixTypes) -> Self {
+        self.fix_types = fix_types;
+        self
+    }
+
     #[must_use]
     pub fn with_type_check_only(mut self, type_check_only: bool) -> Self {
         self.type_check_only = type_check_only;
@@ -210,6 +224,17 @@ impl LintRunnerBuilder {
     #[must_use]
     pub fn with_ignore_fixes(mut self, with_ignore_fixes: bool) -> Self {
         self.with_ignore_fixes = with_ignore_fixes;
+        self
+    }
+
+    /// Use `file_system` instead of the OS file system to read files and write fixes in
+    /// [`LintRunner::lint_files`]. For example, to lint source text from stdin, or to not write fixes.
+    #[must_use]
+    pub fn with_file_system(
+        mut self,
+        file_system: Box<dyn RuntimeFileSystem + Sync + Send>,
+    ) -> Self {
+        self.file_system = file_system;
         self
     }
 
@@ -230,6 +255,7 @@ impl LintRunnerBuilder {
                         .with_type_check(self.type_check)
                         .with_type_check_only(self.type_check_only)
                         .with_timings(self.timings)
+                        .with_fix_types(self.fix_types)
                         .with_ignore_fixes(self.with_ignore_fixes),
                 ),
                 Err(e) => return Err(e),
@@ -248,6 +274,7 @@ impl LintRunnerBuilder {
             directives_store: directives_coordinator,
             cwd,
             type_check_only: self.type_check_only,
+            file_system: self.file_system,
         })
     }
 }
@@ -268,7 +295,7 @@ impl LintRunner {
         diff_manager: &Arc<DiffManager>,
         rule_timing_store: Option<&RuleTimingStore>,
     ) -> Result<Self, String> {
-        let fs: &(dyn crate::RuntimeFileSystem + Sync + Send) = &OsFileSystem;
+        let fs: &(dyn RuntimeFileSystem + Sync + Send) = &*self.file_system;
 
         if self.type_check_only {
             self.lint_service.collect_parse_diagnostics(fs, files.to_owned(), &tx_error);

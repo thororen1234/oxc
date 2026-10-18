@@ -25,6 +25,10 @@ search: false
   ::: warning Avoid using this option. It can cause differences between import resolution, and type-aware linting. Type aware linting **does not** respect this option, and will always discover the appropriate `tsconfig.json` for each file automatically. :::
 - **`    --init`** &mdash; 
   Initialize oxlint configuration with default values
+- **`    --stdin`** &mdash; 
+  Lint code provided on stdin instead of files
+- **`    --stdin-filename`**=_`PATH`_ &mdash; 
+  Path of the file whose code is provided on stdin. Used to choose the language, configuration and ignore patterns.
 
 
 
@@ -93,6 +97,10 @@ Arguments:
   Apply auto-fixable suggestions. May change program behavior.
 - **`    --fix-dangerously`** &mdash; 
   Apply dangerous fixes and suggestions
+- **`    --fix-dry-run`** &mdash; 
+  Fix issues like `--fix`, but don't save the changes to files. Only issues which would remain after fixing are reported.
+- **`    --fix-type`**=_`TYPE`_ &mdash; 
+  Only apply fixes of these types: `problem`, `suggestion`, `layout` or `directive`. Separate types with commas, or repeat the option. Built-in `correctness` and `suspicious` rules are `problem`, other built-in rules are `suggestion`. JS plugin rules use their `meta.type`.
 
 
 
@@ -121,6 +129,8 @@ Arguments:
 ## Output
 - **`-f`**, **`--format`**=_`ARG`_ &mdash; 
   Use a specific output format. Possible values: `checkstyle`, `default`, `agent`, `github`, `gitlab`, `json`, `junit`, `sarif`, `stylish`, `unix`
+- **`-o`**, **`--output-file`**=_`PATH`_ &mdash; 
+  Write the lint report to a file instead of to stdout
 - **`    --debug`**=_`OPTIONS`_ &mdash; 
   Enable debug output options. Options are comma-separated. Possible values:
  * `files` - Print the list of files that will be linted, then exit.
@@ -145,6 +155,8 @@ Arguments:
   Report directive comments like `// oxlint-disable-line`, when no errors would have been reported on that line anyway
 - **`    --report-unused-disable-directives-severity`**=_`SEVERITY`_ &mdash; 
   Same as `--report-unused-disable-directives`, but allows you to specify the severity level of the reported errors. Only one of these two options can be used at a time.
+- **`    --no-inline-config`** &mdash; 
+  Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`), `/* global */` comments, and rule configuration comments (`/* eslint rule: "off" */`)
 
 
 

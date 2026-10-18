@@ -10,7 +10,7 @@ mod ignore_matcher;
 mod overrides;
 mod oxlintrc;
 pub mod plugins;
-mod rules;
+pub mod rules;
 mod settings;
 pub use config_builder::{ConfigBuilderError, ConfigStoreBuilder};
 pub use config_store::{Config, ConfigStore, ResolvedLinterState};

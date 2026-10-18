@@ -698,6 +698,7 @@ impl ConfigStoreBuilder {
                 result.offset,
                 result.rule_names,
             );
+            external_plugin_store.set_rule_types(result.offset, &result.rule_types);
             Ok(())
         } else {
             // TODO: If a plugin with a reserved name reaches this point, it has already been

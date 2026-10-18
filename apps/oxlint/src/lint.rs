@@ -2,7 +2,8 @@ use std::{
     env,
     ffi::OsStr,
     fmt::Debug,
-    io::{ErrorKind, Write},
+    fs,
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf, absolute},
     sync::Arc,
     time::Instant,
@@ -11,6 +12,7 @@ use std::{
 use cow_utils::CowUtils;
 use ignore::{gitignore::Gitignore, overrides::OverrideBuilder};
 
+use oxc_allocator::Allocator;
 use oxc_config::GitignoreChecker;
 use oxc_diagnostics::{
     DiagnosticSender, DiagnosticService, GraphicalReportHandler, GraphicalTheme, OxcDiagnostic,
@@ -18,7 +20,8 @@ use oxc_diagnostics::{
 use oxc_linter::{
     AllowWarnDeny, ConfigBuilderError, ConfigStore, ConfigStoreBuilder, ExternalLinter,
     ExternalPluginStore, InvalidFilterKind, LintFilter, LintOptions, LintRunner,
-    LintServiceOptions, Linter, OxlintSuppressionFileAction, RuleTimingStore, SuppressionManager,
+    LintServiceOptions, Linter, OsFileSystem, OxlintSuppressionFileAction, RuleTimingStore,
+    RuntimeFileSystem, SuppressionManager,
 };
 
 #[cfg(feature = "napi")]
@@ -44,6 +47,8 @@ pub struct CliRunner {
     /// This is only available when running via Node.js with NAPI.
     #[cfg(feature = "napi")]
     js_config_loader: Option<JsConfigLoaderCb>,
+    /// Source text to lint with `--stdin`. Read from stdin if `None`.
+    stdin_source_text: Option<String>,
 }
 
 impl Debug for CliRunner {
@@ -58,6 +63,7 @@ impl Debug for CliRunner {
             "js_config_loader",
             if self.js_config_loader.is_some() { &"Some(JsConfigLoaderCb)" } else { &"None" },
         );
+        s.field("stdin_source_text", &self.stdin_source_text);
         s.finish()
     }
 }
@@ -71,6 +77,7 @@ impl CliRunner {
             external_linter,
             #[cfg(feature = "napi")]
             js_config_loader: None,
+            stdin_source_text: None,
         }
     }
 
@@ -80,6 +87,7 @@ impl CliRunner {
         let debug_files = self.options.output_options.debug.contains(DebugOption::Files);
         let debug_timings = self.options.output_options.debug.contains(DebugOption::Timings);
         let output_formatter = OutputFormatter::new(format_str);
+        let output_file = self.options.output_options.output_file.clone();
 
         let LintCommand {
             paths,
@@ -100,9 +108,78 @@ impl CliRunner {
             return crate::mode::run_init(&self.cwd, stdout);
         }
 
+        if fix_options.fix && fix_options.fix_dry_run {
+            print_and_flush_stdout(
+                stdout,
+                "The `--fix` option and the `--fix-dry-run` option cannot be used together.
+",
+            );
+            return CliRunResult::InvalidOptionFixWithFixDryRun;
+        }
+        let fix_types = match fix_options.fix_types() {
+            Ok(fix_types) => fix_types,
+            Err(invalid) => {
+                print_and_flush_stdout(
+                    stdout,
+                    &format!(
+                        "Invalid `--fix-type` value \"{invalid}\". Valid values are `problem`, `suggestion`, `layout` and `directive`.
+"
+                    ),
+                );
+                return CliRunResult::InvalidOptionFixType;
+            }
+        };
+        if !fix_options.fix_type.is_empty() && !fix_options.is_enabled() {
+            print_and_flush_stdout(
+                stdout,
+                "The `--fix-type` option requires a fix option, such as `--fix` or `--fix-dry-run`.
+",
+            );
+            return CliRunResult::InvalidOptionFixType;
+        }
+        if basic_options.stdin && fix_options.writes_files() {
+            print_and_flush_stdout(
+                stdout,
+                "Fix options are not supported when linting code from stdin. Use `--fix-dry-run` instead.
+",
+            );
+            return CliRunResult::InvalidOptionFixWithStdin;
+        }
+
+        // With `--stdin`, lint the code from stdin as the file at `--stdin-filename`, and ignore other paths.
+        let stdin = if basic_options.stdin {
+            let source_text = match self.stdin_source_text.clone() {
+                Some(source_text) => source_text,
+                None => match io::read_to_string(io::stdin()) {
+                    Ok(source_text) => source_text,
+                    Err(error) => {
+                        print_and_flush_stdout(
+                            stdout,
+                            &format!(
+                                "Failed to read from stdin: {error}
+"
+                            ),
+                        );
+                        return CliRunResult::StdinReadFailed;
+                    }
+                },
+            };
+            let file_name =
+                basic_options.stdin_filename.clone().unwrap_or_else(|| PathBuf::from("<text>.js"));
+            let path = if file_name.is_absolute() { file_name } else { self.cwd.join(file_name) };
+            Some((path, source_text))
+        } else {
+            None
+        };
+        let no_error_on_unmatched_pattern =
+            misc_options.no_error_on_unmatched_pattern || stdin.is_some();
+
         let external_linter = self.external_linter.as_ref();
 
-        let mut paths = paths;
+        let mut paths = match &stdin {
+            Some((path, _)) => vec![path.clone()],
+            None => paths,
+        };
         let provided_path_count = paths.len();
         let now = Instant::now();
 
@@ -213,12 +290,16 @@ impl CliRunner {
                 &output_formatter,
                 now,
                 None,
-                misc_options.no_error_on_unmatched_pattern,
+                no_error_on_unmatched_pattern,
             );
         }
 
-        let walker = Walk::new(&paths, &self.cwd, &ignore_options, override_builder);
-        let mut paths = walker.paths();
+        // The file passed with `--stdin` doesn't need to exist, so don't look for it.
+        let mut paths = if stdin.is_some() {
+            paths.into_iter().map(|path| Arc::from(path.into_os_string())).collect()
+        } else {
+            Walk::new(&paths, &self.cwd, &ignore_options, override_builder).paths()
+        };
 
         // NAPI tests build `oxlint` with `testing` feature enabled.
         // In NAPI tests, sort file paths if oxlint is run with `--threads 1`.
@@ -404,7 +485,7 @@ impl CliRunner {
             options.cwd(),
             "oxlint-suppressions.json",
             suppression_options.suppress_all,
-            suppression_options.prune_suppressions || fix_options.is_enabled(),
+            suppression_options.prune_suppressions || fix_options.writes_files(),
         );
 
         let config_store = ConfigStore::new(lint_config, nested_configs, external_plugin_store);
@@ -480,7 +561,9 @@ impl CliRunner {
 
         let linter = Linter::new(LintOptions::default(), config_store, external_linter)
             .with_fix(fix_options.fix_kind())
-            .with_report_unused_directives(report_unused_directives);
+            .with_report_unused_directives(report_unused_directives)
+            .with_no_inline_config(inline_config_options.no_inline_config)
+            .with_fix_types(fix_types);
 
         let number_of_files = files_to_lint.len();
         let tsconfig = basic_options.tsconfig;
@@ -511,7 +594,7 @@ impl CliRunner {
                 &output_formatter,
                 now,
                 number_of_rules,
-                misc_options.no_error_on_unmatched_pattern,
+                no_error_on_unmatched_pattern,
             );
         }
 
@@ -523,8 +606,13 @@ impl CliRunner {
             .with_type_check(type_check)
             .with_silent(misc_options.silent)
             .with_fix_kind(fix_options.fix_kind())
+            .with_fix_types(fix_types)
             .with_type_check_only(type_check_only)
             .with_timings(debug_timings)
+            .with_file_system(Box::new(CliFileSystem {
+                stdin,
+                write_fixes: !fix_options.fix_dry_run,
+            }))
             .build()
         {
             Ok(runner) => runner,
@@ -569,7 +657,12 @@ impl CliRunner {
 
         drop(tx_error);
 
-        let diagnostic_result = diagnostic_service.run(stdout);
+        // With `--output-file`, write the report to a buffer, and save it to the file at the end.
+        let mut report = Vec::new();
+        let report_writer: &mut dyn Write =
+            if output_file.is_some() { &mut report } else { &mut *stdout };
+
+        let diagnostic_result = diagnostic_service.run(report_writer);
 
         let oxlint_suppression_file_action = if let Err(report_suppression_error) = result {
             OxlintSuppressionFileAction::UnableToPerformFsOperation(report_suppression_error)
@@ -595,7 +688,26 @@ impl CliRunner {
                 }
             }),
         }) {
-            print_and_flush_stdout(stdout, &end);
+            print_and_flush_stdout(report_writer, &end);
+        }
+
+        if let Some(output_file) = &output_file {
+            let output_file = if output_file.is_absolute() {
+                output_file.clone()
+            } else {
+                self.cwd.join(output_file)
+            };
+            if let Err(error) = fs::write(&output_file, &report) {
+                print_and_flush_stdout(
+                    stdout,
+                    &format!(
+                        "Failed to write report to {} with error \"{error}\"
+",
+                        output_file.display()
+                    ),
+                );
+                return CliRunResult::OutputFileWriteFailed;
+            }
         }
 
         // When --suppress-all is used and the file was written successfully,
@@ -624,6 +736,13 @@ impl CliRunner {
     #[must_use]
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    /// Use `source_text` as the code to lint with `--stdin`, instead of reading stdin.
+    #[must_use]
+    pub fn with_stdin_source_text(mut self, source_text: String) -> Self {
+        self.stdin_source_text = Some(source_text);
         self
     }
 
@@ -723,6 +842,34 @@ impl CliRunner {
     }
 }
 
+/// File system for the CLI.
+///
+/// Serves the code passed with `--stdin` for its file path, and doesn't write fixes with `--fix-dry-run`.
+struct CliFileSystem {
+    /// Absolute path and source text of the code passed with `--stdin`.
+    stdin: Option<(PathBuf, String)>,
+    write_fixes: bool,
+}
+
+impl RuntimeFileSystem for CliFileSystem {
+    fn read_to_arena_str<'a>(
+        &self,
+        path: &Path,
+        allocator: &'a Allocator,
+    ) -> Result<&'a str, io::Error> {
+        if let Some((stdin_path, source_text)) = &self.stdin
+            && stdin_path == path
+        {
+            return Ok(allocator.alloc_str(source_text));
+        }
+        OsFileSystem.read_to_arena_str(path, allocator)
+    }
+
+    fn write_file(&self, path: &Path, content: &str) -> Result<(), io::Error> {
+        if self.write_fixes { OsFileSystem.write_file(path, content) } else { Ok(()) }
+    }
+}
+
 pub fn print_and_flush_stdout(stdout: &mut dyn Write, message: &str) {
     stdout.write_all(message.as_bytes()).or_else(check_for_writer_error).unwrap();
     stdout.flush().or_else(check_for_writer_error).unwrap();
@@ -761,9 +908,9 @@ fn render_config_builder_error(
 
 #[cfg(test)]
 mod test {
-    use std::fs;
+    use std::{env, fs};
 
-    use crate::{DEFAULT_OXLINTRC_NAME, tester::Tester};
+    use crate::{DEFAULT_OXLINTRC_NAME, cli::CliRunResult, tester::Tester};
     use oxc_linter::rules::RULES;
 
     fn markdown_rule_row<'a>(output: &'a str, plugin: &str, name: &str) -> Vec<&'a str> {
@@ -1288,6 +1435,381 @@ mod test {
             "<script>var x = new String('Hello world');</script>\n<script>var y = new String('Hello world');</script>\n",
             "<script>var x = 'Hello world';</script>\n<script>var y = 'Hello world';</script>\n",
         );
+    }
+
+    #[test]
+    fn test_fix_multi_pass() {
+        // The outer fix overlaps the inner one, so the inner call is only fixed by a second pass.
+        Tester::new().with_cwd("fixtures/cli/fix_argument".into()).test_fix(
+            "multi_pass.js",
+            "var x = Math.pow(Math.pow(2, 3), 4);\n",
+            "var x = (2 ** 3) ** 4;\n",
+        );
+    }
+
+    #[test]
+    fn test_fix_dry_run() {
+        let tester = Tester::new().with_cwd("fixtures/cli/fix_argument".into());
+        let path = tester.cwd().join("dry_run.js");
+        let before = fs::read_to_string(&path).unwrap();
+
+        let (output, result) =
+            tester.test_output_with_diagnostics(&["--fix-dry-run", "-f", "unix", "dry_run.js"]);
+
+        // The fixable `no-new-wrappers` issue is fixed, so only `no-debugger` is reported.
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("no-debugger"), "{output}");
+        assert!(!output.contains("no-new-wrappers"), "{output}");
+        // The fix isn't saved.
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_fix_with_fix_dry_run() {
+        let (_, result) = Tester::new()
+            .with_cwd("fixtures/cli/fix_argument".into())
+            .test_output(&["--fix", "--fix-dry-run", "dry_run.js"]);
+        assert!(matches!(result, CliRunResult::InvalidOptionFixWithFixDryRun), "{result:?}");
+    }
+
+    #[test]
+    fn test_stdin() {
+        let tester = Tester::new().with_cwd("fixtures/cli/fix_argument".into());
+
+        let (output, result) = tester.test_stdin(
+            &["--stdin", "--stdin-filename", "src/from_stdin.ts", "-f", "unix"],
+            "let x: number = 1;
+debugger;
+",
+        );
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("from_stdin.ts:2:1"), "{output}");
+        assert!(output.contains("no-debugger"), "{output}");
+        assert!(!tester.cwd().join("src").exists(), "stdin file must not be created");
+
+        // Without `--stdin-filename`, code is linted as JavaScript.
+        let (output, result) = tester.test_stdin(
+            &["--stdin", "-f", "unix"],
+            "debugger;
+",
+        );
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("no-debugger"), "{output}");
+
+        // Paths are ignored with `--stdin`.
+        let (output, result) = tester.test_stdin(
+            &["--stdin", "-f", "unix", "dry_run.js"],
+            "var x = 1;
+",
+        );
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+    }
+
+    #[test]
+    fn test_stdin_ignored_file() {
+        let (output, result) =
+            Tester::new().with_cwd("fixtures/cli/fix_argument".into()).test_stdin(
+                &["--stdin", "--stdin-filename", "ignored.js", "--ignore-pattern", "ignored.js"],
+                "debugger;
+",
+            );
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+        assert!(!output.contains("no-debugger"), "{output}");
+    }
+
+    #[test]
+    fn test_stdin_fix() {
+        let tester = Tester::new().with_cwd("fixtures/cli/fix_argument".into());
+
+        let (_, result) = tester.test_stdin(
+            &["--stdin", "--stdin-filename", "a.js", "--fix"],
+            "debugger;
+",
+        );
+        assert!(matches!(result, CliRunResult::InvalidOptionFixWithStdin), "{result:?}");
+
+        let (output, result) = tester.test_stdin(
+            &["--stdin", "--stdin-filename", "from_stdin.js", "--fix-dry-run"],
+            "var x = new String('a');
+",
+        );
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+        assert!(!tester.cwd().join("from_stdin.js").exists(), "stdin file must not be created");
+    }
+
+    #[test]
+    fn test_output_file() {
+        let tester = Tester::new().with_cwd("fixtures/cli/fix_argument".into());
+        let output_file = env::temp_dir().join(format!("oxlint-report-{}.txt", std::process::id()));
+        let output_file_arg = output_file.to_string_lossy().into_owned();
+
+        let (output, result) = tester.test_output_with_diagnostics(&[
+            "-f",
+            "unix",
+            "-o",
+            &output_file_arg,
+            "skip_suggestion.js",
+        ]);
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert_eq!(output, "", "report must not be written to stdout");
+
+        let report = fs::read_to_string(&output_file).unwrap();
+        fs::remove_file(&output_file).unwrap();
+        assert!(report.contains("skip_suggestion.js"), "{report}");
+        assert!(report.contains("no-debugger"), "{report}");
+    }
+
+    /// Lint `source_text` from stdin as `file_name` in `fixtures/cli/inline_config`.
+    fn lint_inline_config(
+        file_name: &str,
+        source_text: &str,
+        extra_args: &[&str],
+    ) -> (String, CliRunResult) {
+        let mut args = vec!["--stdin", "--stdin-filename", file_name, "-f", "unix"];
+        args.extend(extra_args);
+        Tester::new().with_cwd("fixtures/cli/inline_config".into()).test_stdin(&args, source_text)
+    }
+
+    #[test]
+    fn test_inline_config_severity() {
+        let (output, result) = lint_inline_config(
+            "a.js",
+            "/* eslint no-debugger: \"off\" */
+debugger;
+",
+            &[],
+        );
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+        assert!(!output.contains("no-debugger"), "{output}");
+
+        // Applies to the whole file, wherever the comment is.
+        let (output, result) = lint_inline_config(
+            "a.js",
+            "debugger;
+/* eslint no-debugger: 0 */
+",
+            &[],
+        );
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+
+        let (output, result) =
+            lint_inline_config("a.js", "/* eslint no-debugger: warn */ debugger;", &[]);
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("[Warning/eslint(no-debugger)]"), "{output}");
+
+        // The last comment wins.
+        let (output, result) = lint_inline_config(
+            "a.js",
+            "/* eslint no-debugger: off */
+/* oxlint no-debugger: error */
+debugger;",
+            &[],
+        );
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+    }
+
+    #[test]
+    fn test_inline_config_enable_rule_with_options() {
+        let (output, result) =
+            lint_inline_config("a.js", "/* eslint eqeqeq: error */ a == null;", &[]);
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("eqeqeq"), "{output}");
+
+        // `smart` allows comparing with `null`.
+        let (output, result) =
+            lint_inline_config("a.js", "/* eslint eqeqeq: [error, smart] */ a == null;", &[]);
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+
+        let (output, result) = lint_inline_config(
+            "a.ts",
+            "/* eslint @typescript-eslint/no-explicit-any: error */ let x: any;",
+            &[],
+        );
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("no-explicit-any"), "{output}");
+    }
+
+    #[test]
+    fn test_inline_config_turn_off_unknown_rule() {
+        // Common in code migrated from ESLint, so it isn't an error.
+        let (output, result) = lint_inline_config(
+            "a.js",
+            "/* eslint some-plugin/some-rule: off, not-a-rule: 0 */ var a = 1;",
+            &[],
+        );
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+    }
+
+    #[test]
+    fn test_inline_config_invalid() {
+        let (output, result) =
+            lint_inline_config("a.js", "/* eslint not-a-rule: error */ var a = 1;", &[]);
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("Definition for rule \"not-a-rule\" was not found."), "{output}");
+
+        let (output, result) =
+            lint_inline_config("a.js", "/* eslint no-debugger: [off */ var a = 1;", &[]);
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("Failed to parse configuration comment"), "{output}");
+
+        let (output, result) =
+            lint_inline_config("a.js", "/* eslint no-debugger: [error, {}] */ debugger;", &[]);
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("does not accept configuration options"), "{output}");
+    }
+
+    #[test]
+    fn test_no_inline_config() {
+        let source_text = "/* eslint no-debugger: off */
+debugger; // eslint-disable-line
+";
+
+        let (output, result) = lint_inline_config("a.js", source_text, &[]);
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+
+        let (output, result) = lint_inline_config("a.js", source_text, &["--no-inline-config"]);
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("no-debugger"), "{output}");
+
+        // Same with `options.noInlineConfig` in the config file, which also ignores `/* global */`.
+        let (output, result) =
+            Tester::new().with_cwd("fixtures/cli/no_inline_config".into()).test_stdin(
+                &["--stdin", "-f", "unix"],
+                "/* global foo */
+foo;
+/* eslint no-debugger: off */
+debugger; // oxlint-disable-line
+",
+            );
+        assert!(
+            matches!(result, CliRunResult::LintFoundErrors),
+            "{result:?}
+{output}"
+        );
+        assert!(output.contains("no-debugger"), "{output}");
+        assert!(output.contains("'foo' is not defined"), "{output}");
+    }
+
+    #[test]
+    fn test_fix_type() {
+        let tester = Tester::new().with_cwd("fixtures/cli/fix_type".into());
+        // `no-useless-rename` is a `correctness` rule (`problem`),
+        // `prefer-exponentiation-operator` is a `style` rule (`suggestion`).
+        let source_text = "const { a: a } = obj;
+var p = Math.pow(2, 3);
+";
+        let lint = |fix_type: &str| {
+            tester.test_stdin(
+                &["--stdin", "-f", "unix", "--fix-dry-run", "--fix-type", fix_type],
+                source_text,
+            )
+        };
+
+        let (output, _) = lint("problem");
+        assert!(!output.contains("no-useless-rename"), "{output}");
+        assert!(output.contains("prefer-exponentiation-operator"), "{output}");
+
+        let (output, _) = lint("suggestion");
+        assert!(output.contains("no-useless-rename"), "{output}");
+        assert!(!output.contains("prefer-exponentiation-operator"), "{output}");
+
+        let (output, result) = lint("problem,suggestion");
+        assert!(
+            matches!(result, CliRunResult::LintSucceeded),
+            "{result:?}
+{output}"
+        );
+
+        let (output, _) = lint("layout");
+        assert!(output.contains("no-useless-rename"), "{output}");
+        assert!(output.contains("prefer-exponentiation-operator"), "{output}");
+
+        let (_, result) = lint("whitespace");
+        assert!(matches!(result, CliRunResult::InvalidOptionFixType), "{result:?}");
+
+        let (_, result) = tester.test_stdin(&["--stdin", "--fix-type", "problem"], source_text);
+        assert!(matches!(result, CliRunResult::InvalidOptionFixType), "{result:?}");
     }
 
     #[test]

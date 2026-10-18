@@ -8,7 +8,7 @@ use crate::LintContext;
 
 mod disable_fix;
 mod fix;
-pub use fix::{CompositeFix, Fix, FixKind, MergeFixesError, PossibleFixes, RuleFix};
+pub use fix::{CompositeFix, Fix, FixKind, FixTypes, MergeFixesError, PossibleFixes, RuleFix};
 
 pub fn oxc_code_short_canonical_name(code: &OxcCode) -> Option<String> {
     let Some(scope) = &code.scope else {

@@ -19,8 +19,8 @@ use oxc_span::{SourceType, Span};
 use super::{AllowWarnDeny, ConfigStore, DisableDirectives, ResolvedLinterState, read_to_string};
 
 use crate::{
-    CompositeFix, FixKind, Fixer, Message, PossibleFixes, RuleTimingRecord, RuleTimingSource,
-    RuleTimingStore, WEBSITE_BASE_RULES_URL, suppression::DiffManager,
+    CompositeFix, FixKind, FixTypes, Fixer, Message, PossibleFixes, RuleTimingRecord,
+    RuleTimingSource, RuleTimingStore, WEBSITE_BASE_RULES_URL, suppression::DiffManager,
 };
 
 /// State required to initialize the `tsgolint` linter.
@@ -39,6 +39,8 @@ pub struct TsGoLintState {
     fix: bool,
     /// If `true`, request that suggestions be returned from `tsgolint`.
     fix_suggestions: bool,
+    /// Types of fixes to apply. Fixes from rules of other types are dropped.
+    fix_types: FixTypes,
     /// If `true`, include TypeScript compiler syntactic and semantic diagnostics.
     type_check: bool,
     /// If `true`, skip type-aware lint rules while retaining TypeScript diagnostics.
@@ -61,6 +63,7 @@ impl TsGoLintState {
             silent: false,
             fix: fix_kind.contains(FixKind::Fix),
             fix_suggestions: fix_kind.contains(FixKind::Suggestion),
+            fix_types: FixTypes::all(),
             type_check: false,
             type_check_only: false,
             timings: false,
@@ -86,6 +89,7 @@ impl TsGoLintState {
             silent: false,
             fix: fix_kind.contains(FixKind::Fix),
             fix_suggestions: fix_kind.contains(FixKind::Suggestion),
+            fix_types: FixTypes::all(),
             type_check: false,
             type_check_only: false,
             timings: false,
@@ -127,6 +131,13 @@ impl TsGoLintState {
     #[must_use]
     pub fn with_timings(mut self, yes: bool) -> Self {
         self.timings = yes;
+        self
+    }
+
+    /// Only apply fixes from rules of these types. See [`FixTypes`].
+    #[must_use]
+    pub fn with_fix_types(mut self, fix_types: FixTypes) -> Self {
+        self.fix_types = fix_types;
         self
     }
 
@@ -203,10 +214,10 @@ impl TsGoLintState {
                         }
                         Ok(TsGoLintMessage::Diagnostic(tsgolint_diagnostic)) => {
                             match tsgolint_diagnostic {
-                                TsGoLintDiagnostic::Rule(tsgolint_diagnostic) => {
+                                TsGoLintDiagnostic::Rule(mut tsgolint_diagnostic) => {
                                     let path = &tsgolint_diagnostic.file_path;
 
-                                    let severity = resolved_configs
+                                    let rule_and_severity = resolved_configs
                                             .get(path)
                                             .or_else(|| {
                                                 debug_assert!(false, "resolved_configs should have an entry for every file we linted {tsgolint_diagnostic:?}");
@@ -219,8 +230,19 @@ impl TsGoLintState {
                                                     .find(|(rule, _)| {
                                                         rule.name() == tsgolint_diagnostic.rule
                                                     })
-                                                    .map(|(_, status)| *status)
-                                            })
+                                            });
+                                    // Drop fixes from rules whose type isn't allowed by `--fix-type`
+                                    if let Some((rule, _)) = rule_and_severity
+                                        && !self.fix_types.is_all()
+                                        && !self
+                                            .fix_types
+                                            .intersects(FixTypes::from_category(rule.category()))
+                                    {
+                                        tsgolint_diagnostic.fixes.clear();
+                                        tsgolint_diagnostic.suggestions.clear();
+                                    }
+                                    let severity = rule_and_severity
+                                            .map(|(_, status)| *status)
                                             .or_else(|| {
                                                 debug_assert!(false, "resolved_config should have a matching rule for every diagnostic we received {tsgolint_diagnostic:?}");
                                                 None

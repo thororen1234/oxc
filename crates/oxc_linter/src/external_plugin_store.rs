@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use oxc_index::{IndexVec, define_index_type, index_vec};
 use serde::{Serialize, Serializer};
 
-use crate::ExternalLinter;
+use crate::{ExternalLinter, FixTypes};
 
 define_index_type! {
     pub struct ExternalPluginId = u32;
@@ -114,7 +114,11 @@ impl ExternalPluginStore {
         );
 
         for rule_name in rule_names {
-            let rule_id = self.rules.push(ExternalRule { name: rule_name.clone(), plugin_id });
+            let rule_id = self.rules.push(ExternalRule {
+                name: rule_name.clone(),
+                plugin_id,
+                fix_type: FixTypes::empty(),
+            });
             self.plugins[plugin_id].rules.insert(rule_name, rule_id);
         }
     }
@@ -136,6 +140,23 @@ impl ExternalPluginStore {
                 rule: rule_name.to_string(),
             }
         })
+    }
+
+    /// Set the fix types of the rules of a plugin registered with [`ExternalPluginStore::register_plugin`],
+    /// from the rules' `meta.type`. `offset` is the ID of the plugin's first rule.
+    pub fn set_rule_types(&mut self, offset: usize, rule_types: &[Option<String>]) {
+        for (index, rule_type) in rule_types.iter().enumerate() {
+            let rule_id = ExternalRuleId::from_usize(offset + index);
+            self.rules[rule_id].fix_type = rule_type
+                .as_deref()
+                .and_then(FixTypes::from_rule_type)
+                .unwrap_or(FixTypes::empty());
+        }
+    }
+
+    /// Fix type of a rule, from its `meta.type`. Empty if the rule has no valid `meta.type`.
+    pub fn rule_fix_type(&self, external_rule_id: ExternalRuleId) -> FixTypes {
+        self.rules[external_rule_id].fix_type
     }
 
     pub fn resolve_plugin_rule_names(
@@ -273,4 +294,5 @@ struct ExternalPlugin {
 struct ExternalRule {
     name: String,
     plugin_id: ExternalPluginId,
+    fix_type: FixTypes,
 }

@@ -1,0 +1,9 @@
+{
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "no-useless-rename": "error",
+    "prefer-exponentiation-operator": "error"
+  }
+}

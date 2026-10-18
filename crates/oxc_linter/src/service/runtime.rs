@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     ffi::OsStr,
     fs,
     hash::BuildHasherDefault,
@@ -41,6 +40,17 @@ use super::LintServiceOptions;
 
 type ModulesByPath =
     papaya::HashMap<Arc<OsStr>, SmallVec<[Arc<ModuleRecord>; 1]>, BuildHasherDefault<FxHasher>>;
+
+/// Maximum number of times fixes are applied to a file in one run.
+/// Same as ESLint's `MAX_AUTOFIX_PASSES`, which also guards against rules whose fixes undo each other.
+const MAX_FIX_PASSES: usize = 10;
+
+/// Source type used by [`Fixer`] to check that fixed code still parses (in debug builds).
+fn fixer_source_type(path: &Path) -> Option<SourceType> {
+    SourceType::from_path(path)
+        .ok()
+        .map(|st| if st.is_javascript() { st.with_jsx(true) } else { st })
+}
 
 pub struct Runtime {
     cwd: Box<Path>,
@@ -621,128 +631,266 @@ impl Runtime {
                 true,
                 Some(tx_error),
                 move |me, mut module_to_lint| {
-                    module_to_lint.content.with_dependent_mut(|allocator_guard, dep| {
-                        // If there are fixes, we will accumulate all of them and write to the file at the end.
-                        // This means we do not write multiple times to the same file if there are multiple sources
-                        // in the same file (for example, multiple scripts in an `.astro` file).
-                        let mut new_source_text = Cow::from(dep.source_text);
+                    let path = Path::new(&module_to_lint.path);
 
-                        let path = Path::new(&module_to_lint.path);
-
-                        assert_eq!(
-                            module_to_lint.section_module_records.len(),
-                            dep.section_contents.len()
-                        );
-
-                        let respect_eslint_disable_directives =
-                            me.linter.respect_eslint_disable_directives();
-                        let context_sub_hosts: Vec<ContextSubHost<'_>> = module_to_lint
-                            .section_module_records
-                            .into_iter()
-                            .zip(dep.section_contents.drain(..))
-                            .filter_map(|(record_result, section)| match record_result {
-                                Ok(module_record) => Some(ContextSubHost::new(
-                                    section.semantic.unwrap(),
-                                    Arc::clone(&module_record),
-                                    section.source.start,
-                                    ContextSubHostOptions {
-                                        framework_options: section.source.framework_options,
-                                        parser_tokens: section.parser_tokens,
-                                        respect_eslint_disable_directives,
-                                        ..Default::default()
-                                    },
-                                )),
-                                Err(messages) => {
-                                    if !messages.is_empty() {
-                                        let diagnostics = DiagnosticService::wrap_diagnostics(
-                                            &me.cwd,
-                                            path,
-                                            dep.source_text,
-                                            messages,
-                                        );
-                                        tx_error.send(diagnostics).unwrap();
-                                    }
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        if context_sub_hosts.is_empty() {
-                            return;
-                        }
-
-                        let (mut messages, disable_directives) =
-                            me.linter.run_with_disable_directives::<TIMINGS>(
-                                path,
-                                context_sub_hosts,
-                                allocator_guard,
-                                me.js_allocator_pool(),
-                                rule_timing_store,
+                    // Source text after the first round of fixes, if any fixes were applied.
+                    let fixed_source_text =
+                        module_to_lint.content.with_dependent_mut(|allocator_guard, dep| {
+                            assert_eq!(
+                                module_to_lint.section_module_records.len(),
+                                dep.section_contents.len()
                             );
 
-                        // Store the disable directives for this file
-                        if let Some(disable_directives) = disable_directives {
-                            me.disable_directives_map
-                                .lock()
-                                .expect("disable_directives_map mutex poisoned")
-                                .insert(path.to_path_buf(), disable_directives);
-                        }
+                            let respect_eslint_disable_directives =
+                                me.linter.respect_eslint_disable_directives();
+                            let context_sub_hosts: Vec<ContextSubHost<'_>> = module_to_lint
+                                .section_module_records
+                                .into_iter()
+                                .zip(dep.section_contents.drain(..))
+                                .filter_map(|(record_result, section)| match record_result {
+                                    Ok(module_record) => Some(ContextSubHost::new(
+                                        section.semantic.unwrap(),
+                                        Arc::clone(&module_record),
+                                        section.source.start,
+                                        ContextSubHostOptions {
+                                            framework_options: section.source.framework_options,
+                                            parser_tokens: section.parser_tokens,
+                                            respect_eslint_disable_directives,
+                                            respect_inline_config: me
+                                                .linter
+                                                .respect_inline_config(),
+                                            ..Default::default()
+                                        },
+                                    )),
+                                    Err(messages) => {
+                                        if !messages.is_empty() {
+                                            let diagnostics = DiagnosticService::wrap_diagnostics(
+                                                &me.cwd,
+                                                path,
+                                                dep.source_text,
+                                                messages,
+                                            );
+                                            tx_error.send(diagnostics).unwrap();
+                                        }
+                                        None
+                                    }
+                                })
+                                .collect();
 
-                        if me.linter.options().fix.is_some() {
-                            let fix_result = Fixer::new(
-                                dep.source_text,
-                                messages,
-                                SourceType::from_path(path).ok().map(|st| {
-                                    if st.is_javascript() { st.with_jsx(true) } else { st }
-                                }),
-                            )
-                            .fix();
-                            if fix_result.fixed {
-                                // write to file, replacing only the changed part
-                                let start = 0;
-                                let end = start + dep.source_text.len();
-                                new_source_text
-                                    .to_mut()
-                                    .replace_range(start..end, &fix_result.fixed_code);
+                            if context_sub_hosts.is_empty() {
+                                return None;
                             }
 
-                            messages = fix_result.messages;
-                        }
+                            let (mut messages, disable_directives) =
+                                me.linter.run_with_disable_directives::<TIMINGS>(
+                                    path,
+                                    context_sub_hosts,
+                                    allocator_guard,
+                                    me.js_allocator_pool(),
+                                    rule_timing_store,
+                                );
 
-                        if !diff_manager.skip() {
-                            messages = diff_manager.collect_file(path, &self.cwd, messages);
-                        }
+                            if me.linter.options().fix.is_some() {
+                                let fix_result =
+                                    Fixer::new(dep.source_text, messages, fixer_source_type(path))
+                                        .fix();
+                                if fix_result.fixed {
+                                    // Diagnostics and disable directives are reported from the final fix pass.
+                                    return Some(fix_result.fixed_code.into_owned());
+                                }
+                                messages = fix_result.messages;
+                            }
 
-                        if !messages.is_empty() {
-                            let errors = messages.into_iter().map(Into::into).collect();
-                            let diagnostics = DiagnosticService::wrap_diagnostics(
-                                &me.cwd,
+                            me.report_file_messages(
                                 path,
                                 dep.source_text,
-                                errors,
+                                messages,
+                                disable_directives,
+                                diff_manager,
+                                tx_error,
                             );
-                            tx_error.send(diagnostics).unwrap();
-                        }
+                            None
+                        });
 
-                        // If the new source text is owned, that means it was modified,
-                        // so we write the new source text to the file.
-                        if let Cow::Owned(new_source_text) = &new_source_text
-                            && let Err(error) = file_system.write_file(path, new_source_text)
-                        {
-                            tx_error
-                                .send(vec![
-                                    OxcDiagnostic::error(format!(
-                                        "Failed to write file {} with error \"{error}\"",
-                                        path.display()
-                                    ))
-                                    .into(),
-                                ])
-                                .unwrap();
-                        }
-                    });
+                    let Some(fixed_source_text) = fixed_source_text else {
+                        return;
+                    };
+
+                    // Return the allocator to the pool before re-linting. A fixed-size pool only holds
+                    // one allocator per thread, so holding this one while taking another could exhaust it.
+                    drop(module_to_lint.content);
+
+                    let (source_text, messages, disable_directives) = me.run_fix_passes::<TIMINGS>(
+                        path,
+                        fixed_source_text,
+                        tx_error,
+                        rule_timing_store,
+                    );
+
+                    me.report_file_messages(
+                        path,
+                        &source_text,
+                        messages,
+                        disable_directives,
+                        diff_manager,
+                        tx_error,
+                    );
+
+                    if let Err(error) = file_system.write_file(path, &source_text) {
+                        tx_error
+                            .send(vec![
+                                OxcDiagnostic::error(format!(
+                                    "Failed to write file {} with error \"{error}\"",
+                                    path.display()
+                                ))
+                                .into(),
+                            ])
+                            .unwrap();
+                    }
                 },
             );
         });
+    }
+
+    /// Re-lint and re-fix `source_text`, which already had one round of fixes applied, until no more fixes
+    /// apply or [`MAX_FIX_PASSES`] is reached. This matches ESLint, so that fixes skipped because they
+    /// overlapped another fix, and fixes which only become possible after another fix, are still applied.
+    ///
+    /// Returns the final source text, along with the diagnostics and disable directives for it.
+    fn run_fix_passes<const TIMINGS: bool>(
+        &self,
+        path: &Path,
+        mut source_text: String,
+        tx_error: &DiagnosticSender,
+        rule_timing_store: Option<&RuleTimingStore>,
+    ) -> (String, Vec<Message>, Option<DisableDirectives>) {
+        let ext = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+        let mut source_type = SourceType::from_path(path).unwrap_or_default();
+        if source_type.is_javascript() {
+            source_type = source_type.with_jsx(true);
+        }
+        let respect_eslint_disable_directives = self.linter.respect_eslint_disable_directives();
+
+        let mut fix_passes = 1;
+        loop {
+            let allocator_guard = self.allocator_pool.get();
+            let allocator = &*allocator_guard;
+            let pass_source_text = allocator.alloc_str(&source_text);
+
+            let mut section_contents = SmallVec::new();
+            let records = self.process_source(
+                path,
+                ext,
+                true,
+                source_type,
+                pass_source_text,
+                allocator,
+                Some(&mut section_contents),
+            );
+
+            let mut parse_failed = false;
+            let modules_by_path = self.modules_by_path.pin();
+            let context_sub_hosts: Vec<ContextSubHost<'_>> = records
+                .into_iter()
+                .zip(section_contents)
+                .filter_map(|(record_result, section)| match record_result {
+                    Ok(ResolvedModuleRecord { module_record, resolved_module_requests }) => {
+                        // Fixes may change imports, so link this record into the module graph again.
+                        let mut loaded_modules = module_record.write_loaded_modules();
+                        for request in resolved_module_requests {
+                            if let Some(dep_module_record) = modules_by_path
+                                .get(&request.resolved_requested_path)
+                                .and_then(|records| records.last())
+                            {
+                                loaded_modules
+                                    .insert(request.specifier, Arc::downgrade(dep_module_record));
+                            }
+                        }
+                        drop(loaded_modules);
+
+                        Some(ContextSubHost::new(
+                            section.semantic.unwrap(),
+                            module_record,
+                            section.source.start,
+                            ContextSubHostOptions {
+                                framework_options: section.source.framework_options,
+                                parser_tokens: section.parser_tokens,
+                                respect_eslint_disable_directives,
+                                respect_inline_config: self.linter.respect_inline_config(),
+                                ..Default::default()
+                            },
+                        ))
+                    }
+                    Err(errors) => {
+                        // A fix produced code which doesn't parse. Report it, and stop fixing.
+                        parse_failed = true;
+                        if !errors.is_empty() {
+                            tx_error
+                                .send(DiagnosticService::wrap_diagnostics(
+                                    &self.cwd,
+                                    path,
+                                    pass_source_text,
+                                    errors,
+                                ))
+                                .unwrap();
+                        }
+                        None
+                    }
+                })
+                .collect();
+
+            let (messages, disable_directives) = if context_sub_hosts.is_empty() {
+                (vec![], None)
+            } else {
+                self.linter.run_with_disable_directives::<TIMINGS>(
+                    path,
+                    context_sub_hosts,
+                    allocator,
+                    self.js_allocator_pool(),
+                    rule_timing_store,
+                )
+            };
+
+            if parse_failed || fix_passes >= MAX_FIX_PASSES {
+                return (source_text, messages, disable_directives);
+            }
+
+            let fix_result = Fixer::new(pass_source_text, messages, fixer_source_type(path)).fix();
+            if !fix_result.fixed {
+                return (source_text, fix_result.messages, disable_directives);
+            }
+            source_text = fix_result.fixed_code.into_owned();
+            fix_passes += 1;
+        }
+    }
+
+    /// Store disable directives for a linted file, and send its diagnostics.
+    fn report_file_messages(
+        &self,
+        path: &Path,
+        source_text: &str,
+        mut messages: Vec<Message>,
+        disable_directives: Option<DisableDirectives>,
+        diff_manager: &DiffManager,
+        tx_error: &DiagnosticSender,
+    ) {
+        if let Some(disable_directives) = disable_directives {
+            self.disable_directives_map
+                .lock()
+                .expect("disable_directives_map mutex poisoned")
+                .insert(path.to_path_buf(), disable_directives);
+        }
+
+        if !diff_manager.skip() {
+            messages = diff_manager.collect_file(path, &self.cwd, messages);
+        }
+
+        if !messages.is_empty() {
+            let errors = messages.into_iter().map(Into::into).collect();
+            let diagnostics =
+                DiagnosticService::wrap_diagnostics(&self.cwd, path, source_text, errors);
+            tx_error.send(diagnostics).unwrap();
+        }
     }
 
     // language_server: the language server needs line and character position
@@ -790,6 +938,7 @@ impl Runtime {
                                             framework_options: section.source.framework_options,
                                             parser_tokens: section.parser_tokens,
                                             respect_eslint_disable_directives,
+                                            respect_inline_config: me.linter.respect_inline_config(),
                                             ..Default::default()
                                         },
                                     )),
@@ -933,6 +1082,7 @@ impl Runtime {
                                         framework_options: section.source.framework_options,
                                         parser_tokens: section.parser_tokens,
                                         respect_eslint_disable_directives,
+                                        respect_inline_config: me.linter.respect_inline_config(),
                                         ..Default::default()
                                     },
                                 )),

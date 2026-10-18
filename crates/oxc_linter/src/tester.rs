@@ -367,7 +367,8 @@ impl Tester {
             rule_path,
             expect_pass,
             expect_fail,
-            lint_options: LintOptions::default(),
+            // Rule tests test a single rule, so don't let comments enable other rules.
+            lint_options: LintOptions { skip_inline_rule_config: true, ..LintOptions::default() },
             expect_fix: None,
             snapshot: String::new(),
             snapshot_suffix: None,

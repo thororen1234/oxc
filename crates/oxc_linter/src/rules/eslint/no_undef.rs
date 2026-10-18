@@ -274,6 +274,41 @@ fn test() {
 }
 
 #[test]
+fn test_global_comments() {
+    use crate::tester::Tester;
+
+    let pass = vec![
+        ("/*global b*/ function f() { b; }", None, None),
+        ("/*global b a:false*/  a;  function f() { b; a; }", None, None),
+        ("/*global b:true*/ b++;", None, None),
+        ("/*global b:false*/ function f() { b = 1; }", None, None),
+        ("/*global b:false*/ function f() { b++; }", None, None),
+        ("/*global b*/ b = 1;", None, None),
+        ("/*global b:false*/ var b = 1;", None, None),
+        ("/* globals a, b : writable,c:readonly */ a; b; c;", None, None),
+        ("/* global a -- provided by the page */ a;", None, None),
+        (
+            "/* global b: readonly */ b;",
+            None,
+            Some(serde_json::json!({ "globals": { "b": "off" } })),
+        ),
+    ];
+    let fail = vec![
+        ("// global b\nb;", None, None),
+        ("/*globalb*/ b;", None, None),
+        ("/* global a -- b */ b;", None, None),
+        ("/* global b: invalid */ b;", None, None),
+        (
+            "/* global b: off */ b;",
+            None,
+            Some(serde_json::json!({ "globals": { "b": "readonly" } })),
+        ),
+    ];
+
+    Tester::new(NoUndef::NAME, NoUndef::PLUGIN, pass, fail).test();
+}
+
+#[test]
 fn test_repeated_unresolved_names() {
     use crate::tester::Tester;
 

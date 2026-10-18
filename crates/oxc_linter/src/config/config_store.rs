@@ -393,6 +393,11 @@ impl ConfigStore {
         self.base.base.config.options.respect_eslint_disable_directives.unwrap_or(true)
     }
 
+    /// Whether configuration in comments is ignored, as set in the root config.
+    pub fn no_inline_config(&self) -> bool {
+        self.base.base.config.options.no_inline_config.unwrap_or(false)
+    }
+
     pub(crate) fn get_related_config(&self, path: &Path) -> &Config {
         if self.nested_configs.is_empty() {
             &self.base

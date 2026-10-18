@@ -158,3 +158,17 @@ fn test() {
 
     Tester::new(NoGlobalAssign::NAME, NoGlobalAssign::PLUGIN, pass, fail).test_and_snapshot();
 }
+
+#[test]
+fn test_global_comments() {
+    use crate::tester::Tester;
+
+    let pass = vec![("/*global a:true*/ a = 1", None, None)];
+    let fail = vec![
+        ("/*global b:false*/ function f() { b = 1; }", None, None),
+        ("/*global b:false*/ function f() { b++; }", None, None),
+        ("/*global b*/ b = 1;", None, None),
+    ];
+
+    Tester::new(NoGlobalAssign::NAME, NoGlobalAssign::PLUGIN, pass, fail).test();
+}

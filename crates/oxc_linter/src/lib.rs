@@ -38,6 +38,7 @@ mod external_plugin_store;
 mod fixer;
 mod frameworks;
 mod globals;
+mod inline_config;
 mod module_graph_visitor;
 mod module_record;
 mod options;
@@ -82,7 +83,7 @@ pub use crate::{
         LoadPluginResult, convert_and_merge_js_fixes,
     },
     external_plugin_store::{ExternalOptionsId, ExternalPluginStore, ExternalRuleId},
-    fixer::{Fix, FixKind, Fixer, Message, PossibleFixes, oxc_code_short_canonical_name},
+    fixer::{Fix, FixKind, FixTypes, Fixer, Message, PossibleFixes, oxc_code_short_canonical_name},
     frameworks::FrameworkFlags,
     lint_runner::{DirectivesStore, LintRunner, LintRunnerBuilder},
     loader::LINTABLE_EXTENSIONS,
@@ -294,6 +295,8 @@ impl Linter {
         config: ConfigStore,
         external_linter: Option<ExternalLinter>,
     ) -> Self {
+        let mut options = options;
+        options.no_inline_config |= config.no_inline_config();
         Self { options, config, external_linter, workspace_uri: None }
     }
 
@@ -310,6 +313,20 @@ impl Linter {
         self
     }
 
+    /// Only apply fixes of these types. See [`FixTypes`].
+    #[must_use]
+    pub fn with_fix_types(mut self, fix_types: FixTypes) -> Self {
+        self.options.fix_types = fix_types;
+        self
+    }
+
+    /// Ignore configuration in comments. See [`LintOptions::no_inline_config`].
+    #[must_use]
+    pub fn with_no_inline_config(mut self, no_inline_config: bool) -> Self {
+        self.options.no_inline_config |= no_inline_config;
+        self
+    }
+
     #[must_use]
     pub fn with_report_unused_directives(mut self, report_config: Option<AllowWarnDeny>) -> Self {
         self.options.report_unused_directive = report_config;
@@ -322,6 +339,10 @@ impl Linter {
 
     pub(crate) fn respect_eslint_disable_directives(&self) -> bool {
         self.config.respect_eslint_disable_directives()
+    }
+
+    pub(crate) fn respect_inline_config(&self) -> bool {
+        !self.options.no_inline_config
     }
 
     /// Returns the number of rules that will are being used, unless there
@@ -364,11 +385,30 @@ impl Linter {
         js_allocator_pool: Option<&AllocatorPool>,
         rule_timing_store: Option<&RuleTimingStore>,
     ) -> (Vec<Message>, Option<DisableDirectives>) {
-        let ResolvedLinterState { rules, config, external_rules } = self.config.resolve(path);
-        let mut timing_recorder = TIMINGS.then(|| RuleTimingRecorder::with_capacity(rules.len()));
+        let ResolvedLinterState { mut rules, config, mut external_rules } =
+            self.config.resolve(path);
 
         let mut ctx_host =
             Rc::new(ContextHost::new(path, context_sub_hosts, allocator, self.options, config));
+
+        // Apply `/* eslint rule: ... */` configuration comments.
+        let mut inline_config_diagnostics = vec![];
+        if !self.options.no_inline_config
+            && !self.options.skip_inline_rule_config
+            && let Some((file_rules, file_external_rules, diagnostics)) =
+                inline_config::apply_inline_rule_configs(
+                    &ctx_host,
+                    &self.config,
+                    &rules,
+                    &external_rules,
+                )
+        {
+            rules = file_rules;
+            external_rules = file_external_rules;
+            inline_config_diagnostics = diagnostics;
+        }
+
+        let mut timing_recorder = TIMINGS.then(|| RuleTimingRecorder::with_capacity(rules.len()));
 
         #[cfg(debug_assertions)]
         let mut current_diagnostic_index = 0;
@@ -521,7 +561,8 @@ impl Linter {
             }
         }
 
-        let diagnostics = ctx_host.take_diagnostics();
+        let mut diagnostics = ctx_host.take_diagnostics();
+        diagnostics.append(&mut inline_config_diagnostics);
         let disable_directives = if is_partial_loader_file {
             None
         } else {
@@ -928,11 +969,20 @@ impl Linter {
                         }
                     };
 
+                    // Fixes are only applied if `--fix-type` allows the rule's `meta.type`
+                    let allows_fix_type = ctx_host.allows_fix_type(
+                        self.config.external_plugin_store().rule_fix_type(external_rule_id),
+                    );
+
                     // Convert fix
-                    let fix = diagnostic.fixes.and_then(|fixes| create_fix(fixes, FixKind::Fix));
+                    let fix = diagnostic
+                        .fixes
+                        .filter(|_| allows_fix_type)
+                        .and_then(|fixes| create_fix(fixes, FixKind::Fix));
 
                     // Convert suggestions (only if fix kind allows suggestions), and combine with fix
                     let possible_fixes = if let Some(suggestions) = diagnostic.suggestions
+                        && allows_fix_type
                         && ctx_host.fix.can_apply(FixKind::Suggestion)
                     {
                         debug_assert!(

@@ -115,6 +115,9 @@ interface PluginDetails {
   offset: number;
   // Names of rules within this plugin, in same order as in `registeredRules`
   ruleNames: string[];
+  // `meta.type` of rules within this plugin (`null` if none), in same order as `ruleNames`.
+  // Used to filter fixes with `--fix-type`.
+  ruleTypes: (string | null)[];
 }
 
 /**
@@ -181,6 +184,7 @@ export function registerPlugin(
   const { rules } = plugin;
   const ruleNames = Object.keys(rules);
   const ruleNamesLen = ruleNames.length;
+  const ruleTypes: (string | null)[] = [];
 
   for (let i = 0; i < ruleNamesLen; i++) {
     const ruleName = ruleNames[i],
@@ -195,6 +199,8 @@ export function registerPlugin(
       defaultOptions: Readonly<Options> = DEFAULT_OPTIONS,
       schemaValidator: SchemaValidator | false | null = null;
     const ruleMeta = rule.meta;
+    const ruleType: unknown = ruleMeta?.type;
+    ruleTypes.push(typeof ruleType === "string" ? ruleType : null);
     if (ruleMeta != null) {
       if (typeof ruleMeta !== "object") throw new TypeError("Invalid `rule.meta`");
 
@@ -325,7 +331,7 @@ export function registerPlugin(
 
   registeredPluginNames.add(pluginName);
 
-  return { name: pluginName, offset, ruleNames };
+  return { name: pluginName, offset, ruleNames, ruleTypes };
 }
 
 /**

@@ -807,6 +807,15 @@ export interface OxlintOptions {
    */
   maxWarnings?: number;
   /**
+   * Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`),
+   * `/* global *\/` comments, and rule configuration comments (`/* eslint rule: "off" *\/`).
+   *
+   * Equivalent to passing `--no-inline-config` on the CLI.
+   * Defaults to `false`.
+   * Only supported in the root configuration file.
+   */
+  noInlineConfig?: boolean;
+  /**
    * Report unused disable directives (e.g. `// oxlint-disable-line` or `// eslint-disable-line`).
    *
    * Equivalent to passing `--report-unused-disable-directives-severity` on the CLI.

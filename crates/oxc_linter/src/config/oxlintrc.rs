@@ -64,6 +64,14 @@ pub struct OxlintOptions {
     /// Only supported in the root configuration file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respect_eslint_disable_directives: Option<bool>,
+    /// Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`),
+    /// `/* global */` comments, and rule configuration comments (`/* eslint rule: "off" */`).
+    ///
+    /// Equivalent to passing `--no-inline-config` on the CLI.
+    /// Defaults to `false`.
+    /// Only supported in the root configuration file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_inline_config: Option<bool>,
 }
 
 impl OxlintOptions {
@@ -75,6 +83,7 @@ impl OxlintOptions {
             && self.max_warnings.is_none()
             && self.report_unused_disable_directives.is_none()
             && self.respect_eslint_disable_directives.is_none()
+            && self.no_inline_config.is_none()
     }
 
     #[must_use]
@@ -90,6 +99,7 @@ impl OxlintOptions {
             respect_eslint_disable_directives: self
                 .respect_eslint_disable_directives
                 .or(other.respect_eslint_disable_directives),
+            no_inline_config: self.no_inline_config.or(other.no_inline_config),
         }
     }
 }

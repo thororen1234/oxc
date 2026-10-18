@@ -53,6 +53,55 @@ bitflags! {
     }
 }
 
+bitflags! {
+    /// Types of fixes to apply, matching ESLint's `--fix-type` option.
+    ///
+    /// A fix's type is the type of the rule which provides it. JS plugin rules have the type
+    /// set in their `meta.type`. Built-in rules have a type based on their category:
+    /// `correctness` and `suspicious` rules are [`FixTypes::PROBLEM`], all others are [`FixTypes::SUGGESTION`].
+    /// Fixes which remove unused disable directives are [`FixTypes::DIRECTIVE`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct FixTypes: u8 {
+        /// Fixes for rules which find code that is wrong or likely to cause errors.
+        const PROBLEM = 1 << 0;
+        /// Fixes for rules which suggest a better way of doing something.
+        const SUGGESTION = 1 << 1;
+        /// Fixes for rules which only change formatting.
+        const LAYOUT = 1 << 2;
+        /// Fixes which remove unused disable directives.
+        const DIRECTIVE = 1 << 3;
+    }
+}
+
+impl Default for FixTypes {
+    /// All fix types.
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl FixTypes {
+    /// Fix type of a built-in rule with the given category.
+    pub fn from_category(category: crate::RuleCategory) -> Self {
+        use crate::RuleCategory;
+        match category {
+            RuleCategory::Correctness | RuleCategory::Suspicious => Self::PROBLEM,
+            _ => Self::SUGGESTION,
+        }
+    }
+
+    /// Fix type from a rule's `meta.type`, or `None` if it isn't a valid type.
+    pub fn from_rule_type(name: &str) -> Option<Self> {
+        match name {
+            "problem" => Some(Self::PROBLEM),
+            "suggestion" => Some(Self::SUGGESTION),
+            "layout" => Some(Self::LAYOUT),
+            "directive" => Some(Self::DIRECTIVE),
+            _ => None,
+        }
+    }
+}
+
 // explicit definition for clarity
 impl Default for FixKind {
     #[inline]

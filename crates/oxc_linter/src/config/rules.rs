@@ -241,7 +241,7 @@ impl OxlintRules {
     }
 }
 
-fn transform_rule_and_plugin_name<'a>(
+pub fn transform_rule_and_plugin_name<'a>(
     rule_name: &'a str,
     plugin_name: &'a str,
 ) -> (&'a str, &'a str) {
@@ -638,7 +638,7 @@ impl<'de> Deserialize<'de> for OxlintRules {
     }
 }
 
-fn parse_rule_key(name: &str) -> (String, String) {
+pub fn parse_rule_key(name: &str) -> (String, String) {
     // For scoped packages (starting with `@`), split at the last `/` to handle
     // packages like `@eslint-react/naming-convention` with rule `rule-name`.
     // For non-scoped packages, split at the first `/`.
@@ -687,7 +687,7 @@ pub(super) fn unalias_plugin_name(plugin_name: &str, rule_name: &str) -> (String
     (plugin_name, rule_name.to_string())
 }
 
-fn parse_rule_value(
+pub fn parse_rule_value(
     value: serde_json::Value,
 ) -> Result<(AllowWarnDeny, SmallVec<[serde_json::Value; 1]>), Error> {
     match value {

@@ -1,0 +1,12 @@
+{
+  "options": {
+    "noInlineConfig": true
+  },
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "no-debugger": "error",
+    "no-undef": "error"
+  }
+}

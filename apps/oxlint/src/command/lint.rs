@@ -1,7 +1,7 @@
 use std::{path::PathBuf, str::FromStr, sync::OnceLock};
 
 use bpaf::{Bpaf, doc::Style};
-use oxc_linter::{AllowWarnDeny, FixKind, LintPlugins};
+use oxc_linter::{AllowWarnDeny, FixKind, FixTypes, LintPlugins};
 
 use crate::output_formatter::OutputFormat;
 
@@ -166,6 +166,15 @@ pub struct BasicOptions {
     /// Initialize oxlint configuration with default values
     #[bpaf(switch, hide_usage)]
     pub init: bool,
+
+    /// Lint code provided on stdin instead of files
+    #[bpaf(switch, hide_usage)]
+    pub stdin: bool,
+
+    /// Path of the file whose code is provided on stdin.
+    /// Used to choose the language, configuration and ignore patterns.
+    #[bpaf(argument("PATH"), hide_usage)]
+    pub stdin_filename: Option<PathBuf>,
 }
 
 // This is formatted according to
@@ -230,13 +239,25 @@ pub struct FixOptions {
     /// Apply dangerous fixes and suggestions
     #[bpaf(switch, hide_usage)]
     pub fix_dangerously: bool,
+
+    /// Fix issues like `--fix`, but don't save the changes to files.
+    /// Only issues which would remain after fixing are reported.
+    #[bpaf(switch, hide_usage)]
+    pub fix_dry_run: bool,
+
+    /// Only apply fixes of these types: `problem`, `suggestion`, `layout` or `directive`.
+    /// Separate types with commas, or repeat the option.
+    /// Built-in `correctness` and `suspicious` rules are `problem`, other built-in rules are `suggestion`.
+    /// JS plugin rules use their `meta.type`.
+    #[bpaf(argument::<String>("TYPE"), many, hide_usage)]
+    pub fix_type: Vec<String>,
 }
 
 impl FixOptions {
     pub fn fix_kind(&self) -> FixKind {
         let mut kind = FixKind::None;
 
-        if self.fix {
+        if self.fix || self.fix_dry_run {
             kind.set(FixKind::SafeFix, true);
         }
 
@@ -252,7 +273,31 @@ impl FixOptions {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.fix || self.fix_suggestions || self.fix_dangerously
+        self.fix || self.fix_suggestions || self.fix_dangerously || self.fix_dry_run
+    }
+
+    /// Fix types selected with `--fix-type`, or all types if it isn't used.
+    ///
+    /// # Errors
+    /// Returns the invalid value if a type is not valid.
+    pub fn fix_types(&self) -> Result<FixTypes, String> {
+        if self.fix_type.is_empty() {
+            return Ok(FixTypes::all());
+        }
+        let mut fix_types = FixTypes::empty();
+        for name in self.fix_type.iter().flat_map(|value| value.split(',')) {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            fix_types |= FixTypes::from_rule_type(name).ok_or_else(|| name.to_string())?;
+        }
+        Ok(fix_types)
+    }
+
+    /// Whether fixes are written to files.
+    pub fn writes_files(&self) -> bool {
+        self.is_enabled() && !self.fix_dry_run
     }
 }
 
@@ -280,6 +325,10 @@ pub struct OutputOptions {
     /// `checkstyle`, `default`, `agent`, `github`, `gitlab`, `json`, `junit`, `sarif`, `stylish`, `unix`
     #[bpaf(long, short, fallback_with(default_output_format), hide_usage)]
     pub format: OutputFormat,
+
+    /// Write the lint report to a file instead of to stdout
+    #[bpaf(short('o'), long("output-file"), argument("PATH"), hide_usage)]
+    pub output_file: Option<PathBuf>,
 
     #[bpaf(
         long("debug"),
@@ -557,6 +606,11 @@ pub enum ReportUnusedDirectives {
 pub struct InlineConfigOptions {
     #[bpaf(external)]
     pub report_unused_directives: ReportUnusedDirectives,
+
+    /// Ignore configuration in comments: disable directives (`eslint-disable`, `oxlint-disable`),
+    /// `/* global */` comments, and rule configuration comments (`/* eslint rule: "off" */`)
+    #[bpaf(switch, hide_usage)]
+    pub no_inline_config: bool,
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ use crate::{
         plugins::plugin_display_name,
     },
     disable_directives::{DisableDirectives, DisableDirectivesBuilder, RuleCommentType},
-    fixer::{Fix, FixKind, Message, PossibleFixes},
+    fixer::{Fix, FixKind, FixTypes, Message, PossibleFixes},
     frameworks::FrameworkOptions,
     module_record::ModuleRecord,
     options::LintOptions,
@@ -74,7 +74,10 @@ impl<'a> ContextSubHost<'a> {
 
         let disable_directives = DisableDirectivesBuilder::new()
             .with_respect_eslint_disable_directives(options.respect_eslint_disable_directives)
-            .build(semantic.source_text(), semantic.comments());
+            .build(
+                semantic.source_text(),
+                if options.respect_inline_config { semantic.comments() } else { &[] },
+            );
 
         Self {
             semantic,
@@ -120,6 +123,8 @@ pub struct ContextSubHostOptions<'a> {
     pub framework_options: FrameworkOptions,
     pub parser_tokens: ArenaBox<'a, [Token]>,
     pub respect_eslint_disable_directives: bool,
+    /// If false, disable directives in comments are ignored. See [`LintOptions::no_inline_config`].
+    pub respect_inline_config: bool,
 }
 
 impl Default for ContextSubHostOptions<'_> {
@@ -128,6 +133,7 @@ impl Default for ContextSubHostOptions<'_> {
             framework_options: FrameworkOptions::Default,
             parser_tokens: ArenaBox::new_empty_boxed_slice(),
             respect_eslint_disable_directives: true,
+            respect_inline_config: true,
         }
     }
 }
@@ -170,6 +176,8 @@ pub struct ContextHost<'a> {
     /// Set via the `--fix`, `--fix-suggestions`, and `--fix-dangerously` CLI
     /// flags.
     pub(crate) fix: FixKind,
+    /// Types of fixes to apply. Set via the `--fix-type` CLI flag.
+    pub(crate) fix_types: FixTypes,
     /// Path to the file being linted.
     pub(super) file_path: Box<Path>,
     /// Extension of the file being linted.
@@ -177,6 +185,9 @@ pub struct ContextHost<'a> {
     /// Global linter configuration, such as globals to include and the target
     /// environments, and other settings.
     pub(super) config: Arc<LintConfig>,
+    /// The configured globals plus those declared by `/* global */` comments in this file.
+    /// `None` if the file has no such comments.
+    comment_globals: Option<OxlintGlobals>,
     /// Front-end frameworks that might be in use in the target file.
     pub(super) frameworks: FrameworkFlags,
     /// If true, the linter will create "ignore this section / line" fixes for all diagnostics
@@ -213,20 +224,41 @@ impl<'a> ContextHost<'a> {
         let file_path = file_path.as_ref().to_path_buf().into_boxed_path();
         let file_extension = file_path.extension().map(|ext| ext.to_owned().into_boxed_os_str());
 
+        let comment_globals = if options.no_inline_config {
+            None
+        } else {
+            config.globals.with_comment_globals(sub_hosts.iter().flat_map(|sub_host| {
+                let source_text = sub_host.source_text();
+                sub_host
+                    .semantic
+                    .comments()
+                    .iter()
+                    .filter(|comment| comment.is_block())
+                    .map(move |comment| comment.content_span().source_text(source_text))
+            }))
+        };
+
         Self {
             sub_hosts,
             allocator,
             current_sub_host_index: Cell::new(0),
             diagnostics: RefCell::new(Vec::with_capacity(DIAGNOSTICS_INITIAL_CAPACITY)),
             fix: options.fix,
+            fix_types: options.fix_types,
             file_path,
             file_extension,
             config,
+            comment_globals,
             frameworks: options.framework_hints,
             with_ignore_fixes: options.with_ignore_fixes,
             react_compiler_results: OnceCell::new(),
         }
         .sniff_for_frameworks()
+    }
+
+    /// All [`ContextSubHost`]s of the file.
+    pub(crate) fn sub_hosts(&self) -> &[ContextSubHost<'a>] {
+        &self.sub_hosts
     }
 
     /// The current [`ContextSubHost`]
@@ -317,7 +349,7 @@ impl<'a> ContextHost<'a> {
 
     #[inline]
     pub fn globals(&self) -> &OxlintGlobals {
-        &self.config.globals
+        self.comment_globals.as_ref().unwrap_or(&self.config.globals)
     }
 
     #[inline]
@@ -328,6 +360,12 @@ impl<'a> ContextHost<'a> {
     #[inline]
     pub fn source_text(&self) -> &'a str {
         self.current_sub_host().source_text()
+    }
+
+    /// Whether fixes from a rule with fix type `rule_fix_type` should be applied.
+    /// A rule with no fix type (empty) is only fixed when all fix types are allowed, as in ESLint.
+    pub(crate) fn allows_fix_type(&self, rule_fix_type: FixTypes) -> bool {
+        self.fix_types.is_all() || self.fix_types.intersects(rule_fix_type)
     }
 
     /// Add a diagnostic message to the end of the list of diagnostics. Can be used
@@ -396,11 +434,15 @@ impl<'a> ContextHost<'a> {
                         )
                         .with_label(span)
                         .with_severity(rule_severity),
-                        PossibleFixes::Single(
-                            Fix::delete(fix_span)
-                                .with_kind(FixKind::Suggestion)
-                                .with_message(fix_message),
-                        ),
+                        if self.allows_fix_type(FixTypes::DIRECTIVE) {
+                            PossibleFixes::Single(
+                                Fix::delete(fix_span)
+                                    .with_kind(FixKind::Suggestion)
+                                    .with_message(fix_message),
+                            )
+                        } else {
+                            PossibleFixes::None
+                        },
                     ));
                 }
                 RuleCommentType::Single(rules_vec) => {
@@ -415,7 +457,11 @@ impl<'a> ContextHost<'a> {
                             OxcDiagnostic::error(rule_message)
                                 .with_label(rule.name_span)
                                 .with_severity(rule_severity),
-                            PossibleFixes::Single(fix),
+                            if self.allows_fix_type(FixTypes::DIRECTIVE) {
+                                PossibleFixes::Single(fix)
+                            } else {
+                                PossibleFixes::None
+                            },
                         ));
                     }
                 }
@@ -495,6 +541,7 @@ impl<'a> ContextHost<'a> {
             current_rule_name: rule_name,
             current_plugin_name: plugin_name,
             current_plugin_display_name: plugin_display_name(plugin_name),
+            current_rule_fix_type: FixTypes::from_category(rule.category()),
             #[cfg(debug_assertions)]
             current_rule_fix_capabilities: rule.fix(),
             severity: severity.into(),
@@ -509,6 +556,7 @@ impl<'a> ContextHost<'a> {
             current_rule_name: "",
             current_plugin_name: "eslint",
             current_plugin_display_name: "eslint",
+            current_rule_fix_type: FixTypes::PROBLEM,
             #[cfg(debug_assertions)]
             current_rule_fix_capabilities: crate::rule::RuleFixMeta::None,
             severity: oxc_diagnostics::Severity::Warning,
